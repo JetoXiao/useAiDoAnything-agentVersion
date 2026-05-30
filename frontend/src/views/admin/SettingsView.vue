@@ -5289,17 +5289,18 @@
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.username') }}</th>
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.code') }}</th>
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.rate') }}</th>
+                        <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.level') }}</th>
                         <th class="px-3 py-2 text-left text-xs font-medium uppercase text-gray-500">{{ t('admin.settings.features.affiliate.customUsers.col.actions') }}</th>
                       </tr>
                     </thead>
                     <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-900">
                       <tr v-if="affiliateState.loading">
-                        <td colspan="6" class="px-3 py-6 text-center text-sm text-gray-500">
+                        <td colspan="7" class="px-3 py-6 text-center text-sm text-gray-500">
                           {{ t('common.loading') }}
                         </td>
                       </tr>
                       <tr v-else-if="affiliateState.entries.length === 0">
-                        <td colspan="6" class="px-3 py-6 text-center text-sm text-gray-500">
+                        <td colspan="7" class="px-3 py-6 text-center text-sm text-gray-500">
                           {{ t('admin.settings.features.affiliate.customUsers.empty') }}
                         </td>
                       </tr>
@@ -5323,6 +5324,19 @@
                         <td class="px-3 py-2 text-sm">
                           <span v-if="entry.aff_rebate_rate_percent != null">{{ entry.aff_rebate_rate_percent }}%</span>
                           <span v-else class="text-gray-400">{{ t('admin.settings.features.affiliate.customUsers.useGlobal') }}</span>
+                        </td>
+                        <td class="px-3 py-2 text-sm">
+                          <span v-if="entry.agent_level" class="text-gray-900 dark:text-white">
+                            {{ entry.agent_level.name }}
+                          </span>
+                          <span v-else-if="entry.effective_agent_level" class="text-gray-600 dark:text-gray-300">
+                            {{ entry.effective_agent_level.name }}
+                          </span>
+                          <span v-else class="text-gray-400">{{ t('admin.settings.features.affiliate.customUsers.autoLevel') }}</span>
+                          <span
+                            v-if="entry.aff_level_manual"
+                            class="ml-1 inline-block rounded bg-primary-100 px-1.5 py-0.5 text-[10px] font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300"
+                          >{{ t('admin.settings.features.affiliate.customUsers.manualBadge') }}</span>
                         </td>
                         <td class="px-3 py-2 text-sm">
                           <div class="flex items-center gap-2">
@@ -5468,6 +5482,19 @@
                 </div>
                 <p class="mt-1 text-xs text-gray-400">
                   {{ t('admin.settings.features.affiliate.modal.rateHint') }}
+                </p>
+              </div>
+
+              <div>
+                <label class="input-label">{{ t('admin.settings.features.affiliate.modal.levelLabel') }}</label>
+                <select v-model="affiliateModal.levelId" class="input">
+                  <option value="">{{ t('admin.settings.features.affiliate.modal.levelAuto') }}</option>
+                  <option v-for="level in affiliateLevels" :key="level.id" :value="String(level.id)">
+                    {{ level.name }} - {{ level.rebate_rate_percent }}%
+                  </option>
+                </select>
+                <p class="mt-1 text-xs text-gray-400">
+                  {{ t('admin.settings.features.affiliate.modal.levelHint') }}
                 </p>
               </div>
             </div>
@@ -6694,7 +6721,7 @@ import ImageUpload from "@/components/common/ImageUpload.vue";
 import BackupSettings from "@/views/admin/BackupView.vue";
 import EmailTemplateEditor from "@/views/admin/settings/EmailTemplateEditor.vue";
 import { useClipboard } from "@/composables/useClipboard";
-import { affiliatesAPI, type AffiliateAdminEntry, type SimpleUser as AffiliateSimpleUser } from "@/api/admin/affiliates";
+import { affiliatesAPI, type AffiliateAdminEntry, type AffiliateAgentLevel, type SimpleUser as AffiliateSimpleUser } from "@/api/admin/affiliates";
 import { extractApiErrorMessage, extractI18nErrorMessage } from "@/utils/apiError";
 import { useAppStore } from "@/stores";
 import { useAdminSettingsStore } from "@/stores/adminSettings";
@@ -9403,6 +9430,8 @@ const affiliateState = reactive<AffiliateState>({
   searchTimer: null,
 });
 
+const affiliateLevels = ref<AffiliateAgentLevel[]>([]);
+
 // `rate` is typed as string|number because <input type="number"> makes Vue's
 // v-model auto-cast the bound value to a Number on every keystroke. We keep
 // both shapes and normalize at read time.
@@ -9416,6 +9445,7 @@ interface AffiliateModalState {
   editingEntry: AffiliateAdminEntry | null;
   code: string;
   rate: string | number;
+  levelId: string | number;
   searchTimer: number | null;
 }
 
@@ -9429,6 +9459,7 @@ const affiliateModal = reactive<AffiliateModalState>({
   editingEntry: null,
   code: "",
   rate: "",
+  levelId: "",
   searchTimer: null,
 });
 
@@ -9538,6 +9569,14 @@ async function loadAffiliateUsers() {
   }
 }
 
+async function loadAffiliateLevels() {
+  try {
+    affiliateLevels.value = (await affiliatesAPI.listAgentLevels(false)).filter((level) => level.enabled);
+  } catch (err) {
+    appStore.showError(extractApiErrorMessage(err, t("common.error")));
+  }
+}
+
 function onAffiliateSearchInput() {
   debounceTimer(affiliateState, 300, () => {
     affiliateState.page = 1;
@@ -9574,6 +9613,11 @@ function openAffiliateModal(entry: AffiliateAdminEntry | null) {
   affiliateModal.code = entry?.aff_code_custom ? entry.aff_code : "";
   affiliateModal.rate =
     entry?.aff_rebate_rate_percent != null ? String(entry.aff_rebate_rate_percent) : "";
+  affiliateModal.levelId =
+    entry?.aff_level_manual && entry.aff_level_id != null ? String(entry.aff_level_id) : "";
+  if (affiliateLevels.value.length === 0) {
+    loadAffiliateLevels();
+  }
 }
 
 function closeAffiliateModal() {
@@ -9623,12 +9667,14 @@ const affiliateModalCanSubmit = computed(() => {
   }
   const codeFilled = affiliateModal.code.trim() !== "";
   const rateFilled = String(affiliateModal.rate ?? "").trim() !== "";
-  if (codeFilled || rateFilled) return true;
+  const levelFilled = String(affiliateModal.levelId ?? "").trim() !== "";
+  if (codeFilled || rateFilled || levelFilled) return true;
   // Edit mode + empty rate input is a meaningful "clear" only if the user
   // currently has an exclusive rate to clear.
   return (
     affiliateModal.mode === "edit" &&
-    affiliateModal.editingEntry?.aff_rebate_rate_percent != null
+    (affiliateModal.editingEntry?.aff_rebate_rate_percent != null ||
+      affiliateModal.editingEntry?.aff_level_manual === true)
   );
 });
 
@@ -9658,6 +9704,18 @@ async function submitAffiliateModal() {
     }
   } else {
     payload.aff_rebate_rate_percent = rateInput;
+  }
+
+  const levelRaw = String(affiliateModal.levelId ?? "").trim();
+  if (levelRaw) {
+    const levelID = Number(levelRaw);
+    if (!Number.isFinite(levelID) || levelID <= 0) {
+      appStore.showError(t("admin.settings.features.affiliate.modal.errorBadLevel"));
+      return;
+    }
+    payload.aff_level_id = levelID;
+  } else if (affiliateModal.mode === "edit" && affiliateModal.editingEntry?.aff_level_manual) {
+    payload.clear_aff_level = true;
   }
 
   affiliateModal.saving = true;
@@ -9726,6 +9784,7 @@ watch(
   (enabled, prev) => {
     if (enabled && !prev) {
       loadAffiliateUsers();
+      loadAffiliateLevels();
     }
   },
 );

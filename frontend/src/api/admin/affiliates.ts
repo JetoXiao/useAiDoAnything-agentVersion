@@ -7,6 +7,31 @@
 import { apiClient } from '../client'
 import type { PaginatedResponse } from '@/types'
 
+export interface AffiliateAgentLevel {
+  id: number
+  code: string
+  name: string
+  rebate_rate_percent: number
+  min_invited_count: number
+  min_history_quota: number
+  sort_order: number
+  enabled: boolean
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface UpsertAffiliateAgentLevelRequest {
+  code: string
+  name: string
+  rebate_rate_percent: number
+  min_invited_count: number
+  min_history_quota: number
+  sort_order: number
+  enabled: boolean
+  is_default: boolean
+}
+
 export interface AffiliateAdminEntry {
   user_id: number
   email: string
@@ -14,7 +39,13 @@ export interface AffiliateAdminEntry {
   aff_code: string
   aff_code_custom: boolean
   aff_rebate_rate_percent?: number | null
+  aff_level_id?: number | null
+  aff_level_manual: boolean
+  agent_level?: AffiliateAgentLevel | null
+  effective_agent_level?: AffiliateAgentLevel | null
+  effective_rebate_rate_percent: number
   aff_count: number
+  aff_history_quota: number
 }
 
 export interface ListAffiliateUsersParams {
@@ -58,6 +89,8 @@ export interface AffiliateRebateRecord {
   order_amount: number
   pay_amount: number
   rebate_amount: number
+  rebate_rate_percent?: number | null
+  agent_level_name?: string
   payment_type: string
   order_status: string
   created_at: string
@@ -83,6 +116,10 @@ export interface AffiliateUserOverview {
   username: string
   aff_code: string
   rebate_rate_percent: number
+  aff_level_id?: number | null
+  aff_level_manual: boolean
+  agent_level?: AffiliateAgentLevel | null
+  rebate_rate_source?: string
   invited_count: number
   rebated_invitee_count: number
   available_quota: number
@@ -92,14 +129,23 @@ export interface AffiliateUserOverview {
 export interface UpdateAffiliateUserRequest {
   aff_code?: string
   aff_rebate_rate_percent?: number | null
+  aff_level_id?: number | null
   /** Set true to explicitly clear the per-user rate (sets it to NULL). */
   clear_rebate_rate?: boolean
+  /** Set true to clear the manually assigned agent level. */
+  clear_aff_level?: boolean
 }
 
 export interface BatchSetRateRequest {
   user_ids: number[]
   aff_rebate_rate_percent?: number | null
   /** Set true to clear rates instead of setting. */
+  clear?: boolean
+}
+
+export interface BatchSetAgentLevelRequest {
+  user_ids: number[]
+  aff_level_id?: number | null
   clear?: boolean
 }
 
@@ -133,6 +179,46 @@ export async function lookupUsers(q: string): Promise<SimpleUser[]> {
   return data
 }
 
+export async function listAgentLevels(
+  includeDisabled = true,
+): Promise<AffiliateAgentLevel[]> {
+  const { data } = await apiClient.get<AffiliateAgentLevel[]>(
+    '/admin/affiliates/levels',
+    { params: { include_disabled: includeDisabled } },
+  )
+  return data
+}
+
+export async function createAgentLevel(
+  payload: UpsertAffiliateAgentLevelRequest,
+): Promise<AffiliateAgentLevel> {
+  const { data } = await apiClient.post<AffiliateAgentLevel>(
+    '/admin/affiliates/levels',
+    payload,
+  )
+  return data
+}
+
+export async function updateAgentLevel(
+  id: number,
+  payload: UpsertAffiliateAgentLevelRequest,
+): Promise<AffiliateAgentLevel> {
+  const { data } = await apiClient.put<AffiliateAgentLevel>(
+    `/admin/affiliates/levels/${id}`,
+    payload,
+  )
+  return data
+}
+
+export async function deleteAgentLevel(
+  id: number,
+): Promise<{ id: number }> {
+  const { data } = await apiClient.delete<{ id: number }>(
+    `/admin/affiliates/levels/${id}`,
+  )
+  return data
+}
+
 export async function updateUserSettings(
   userId: number,
   payload: UpdateAffiliateUserRequest,
@@ -158,6 +244,16 @@ export async function batchSetRate(
 ): Promise<{ affected: number }> {
   const { data } = await apiClient.post<{ affected: number }>(
     '/admin/affiliates/users/batch-rate',
+    payload,
+  )
+  return data
+}
+
+export async function batchSetAgentLevel(
+  payload: BatchSetAgentLevelRequest,
+): Promise<{ affected: number }> {
+  const { data } = await apiClient.post<{ affected: number }>(
+    '/admin/affiliates/users/batch-level',
     payload,
   )
   return data
@@ -218,9 +314,14 @@ export async function getUserOverview(
 export const affiliatesAPI = {
   listUsers,
   lookupUsers,
+  listAgentLevels,
+  createAgentLevel,
+  updateAgentLevel,
+  deleteAgentLevel,
   updateUserSettings,
   clearUserSettings,
   batchSetRate,
+  batchSetAgentLevel,
   listInviteRecords,
   listRebateRecords,
   listTransferRecords,

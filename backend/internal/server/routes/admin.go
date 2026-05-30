@@ -628,6 +628,14 @@ func registerChannelMonitorRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 func registerAffiliateRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	affiliates := admin.Group("/affiliates")
 	{
+		levels := affiliates.Group("/levels")
+		{
+			levels.GET("", h.Admin.Affiliate.ListAgentLevels)
+			levels.POST("", h.Admin.Affiliate.CreateAgentLevel)
+			levels.PUT("/:id", h.Admin.Affiliate.UpdateAgentLevel)
+			levels.DELETE("/:id", h.Admin.Affiliate.DeleteAgentLevel)
+		}
+
 		affiliates.GET("/invites", h.Admin.Affiliate.ListInviteRecords)
 		affiliates.GET("/rebates", h.Admin.Affiliate.ListRebateRecords)
 		affiliates.GET("/transfers", h.Admin.Affiliate.ListTransferRecords)
@@ -637,6 +645,7 @@ func registerAffiliateRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 			users.GET("", h.Admin.Affiliate.ListUsers)
 			users.GET("/lookup", h.Admin.Affiliate.LookupUsers)
 			users.POST("/batch-rate", h.Admin.Affiliate.BatchSetRate)
+			users.POST("/batch-level", h.Admin.Affiliate.BatchSetAgentLevel)
 			users.GET("/:user_id/overview", h.Admin.Affiliate.GetUserOverview)
 			users.PUT("/:user_id", h.Admin.Affiliate.UpdateUserSettings)
 			users.DELETE("/:user_id", h.Admin.Affiliate.ClearUserSettings)

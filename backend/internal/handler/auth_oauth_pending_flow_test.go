@@ -2163,11 +2163,28 @@ CREATE TABLE IF NOT EXISTS user_avatars (
 )`)
 	require.NoError(t, err)
 	_, err = db.Exec(`
+CREATE TABLE IF NOT EXISTS affiliate_agent_levels (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	code TEXT NOT NULL UNIQUE,
+	name TEXT NOT NULL,
+	rebate_rate_percent REAL NOT NULL,
+	min_invited_count INTEGER NOT NULL DEFAULT 0,
+	min_history_quota REAL NOT NULL DEFAULT 0,
+	sort_order INTEGER NOT NULL DEFAULT 0,
+	enabled BOOLEAN NOT NULL DEFAULT true,
+	is_default BOOLEAN NOT NULL DEFAULT false,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS user_affiliates (
 	user_id INTEGER PRIMARY KEY,
 	aff_code TEXT NOT NULL UNIQUE,
 	aff_code_custom BOOLEAN NOT NULL DEFAULT false,
 	aff_rebate_rate_percent REAL NULL,
+	aff_level_id INTEGER NULL,
+	aff_level_manual BOOLEAN NOT NULL DEFAULT false,
 	inviter_id INTEGER NULL,
 	aff_count INTEGER NOT NULL DEFAULT 0,
 	aff_quota REAL NOT NULL DEFAULT 0,

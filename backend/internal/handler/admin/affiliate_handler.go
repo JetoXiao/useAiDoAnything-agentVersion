@@ -53,9 +53,12 @@ func (h *AffiliateHandler) ListUsers(c *gin.Context) {
 type UpdateAffiliateUserRequest struct {
 	AffCode              *string  `json:"aff_code"`
 	AffRebateRatePercent *float64 `json:"aff_rebate_rate_percent"`
+	AffLevelID           *int64   `json:"aff_level_id"`
 	// ClearRebateRate explicitly clears the per-user rate (sets it to NULL).
 	// Used to disambiguate from "field not provided".
 	ClearRebateRate bool `json:"clear_rebate_rate"`
+	// ClearAffLevel clears the manually assigned agent level.
+	ClearAffLevel bool `json:"clear_aff_level"`
 }
 
 func (h *AffiliateHandler) UpdateUserSettings(c *gin.Context) {
@@ -90,6 +93,18 @@ func (h *AffiliateHandler) UpdateUserSettings(c *gin.Context) {
 		}
 	}
 
+	if req.ClearAffLevel {
+		if err := h.affiliateService.AdminSetUserAgentLevel(c.Request.Context(), userID, nil); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	} else if req.AffLevelID != nil {
+		if err := h.affiliateService.AdminSetUserAgentLevel(c.Request.Context(), userID, req.AffLevelID); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
+
 	response.Success(c, gin.H{"user_id": userID})
 }
 
@@ -107,6 +122,10 @@ func (h *AffiliateHandler) ClearUserSettings(c *gin.Context) {
 		return
 	}
 	if err := h.affiliateService.AdminSetUserRebateRate(c.Request.Context(), userID, nil); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if err := h.affiliateService.AdminSetUserAgentLevel(c.Request.Context(), userID, nil); err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
@@ -155,6 +174,125 @@ func (h *AffiliateHandler) BatchSetRate(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"affected": len(req.UserIDs)})
+}
+
+type BatchSetAgentLevelRequest struct {
+	UserIDs    []int64 `json:"user_ids" binding:"required"`
+	AffLevelID *int64  `json:"aff_level_id"`
+	Clear      bool    `json:"clear"`
+}
+
+func (h *AffiliateHandler) BatchSetAgentLevel(c *gin.Context) {
+	var req BatchSetAgentLevelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		response.BadRequest(c, "user_ids cannot be empty")
+		return
+	}
+	if !req.Clear && req.AffLevelID == nil {
+		response.BadRequest(c, "aff_level_id is required unless clear=true")
+		return
+	}
+	levelID := req.AffLevelID
+	if req.Clear {
+		levelID = nil
+	}
+	if err := h.affiliateService.AdminBatchSetUserAgentLevel(c.Request.Context(), req.UserIDs, levelID); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"affected": len(req.UserIDs)})
+}
+
+type AffiliateAgentLevelRequest struct {
+	Code              string  `json:"code"`
+	Name              string  `json:"name"`
+	RebateRatePercent float64 `json:"rebate_rate_percent"`
+	MinInvitedCount   int     `json:"min_invited_count"`
+	MinHistoryQuota   float64 `json:"min_history_quota"`
+	SortOrder         int     `json:"sort_order"`
+	Enabled           *bool   `json:"enabled"`
+	IsDefault         *bool   `json:"is_default"`
+}
+
+func (r AffiliateAgentLevelRequest) toServiceInput() service.AffiliateAgentLevelInput {
+	enabled := true
+	if r.Enabled != nil {
+		enabled = *r.Enabled
+	}
+	isDefault := false
+	if r.IsDefault != nil {
+		isDefault = *r.IsDefault
+	}
+	return service.AffiliateAgentLevelInput{
+		Code:              r.Code,
+		Name:              r.Name,
+		RebateRatePercent: r.RebateRatePercent,
+		MinInvitedCount:   r.MinInvitedCount,
+		MinHistoryQuota:   r.MinHistoryQuota,
+		SortOrder:         r.SortOrder,
+		Enabled:           enabled,
+		IsDefault:         isDefault,
+	}
+}
+
+func (h *AffiliateHandler) ListAgentLevels(c *gin.Context) {
+	includeDisabled := c.Query("include_disabled") != "false"
+	levels, err := h.affiliateService.AdminListAgentLevels(c.Request.Context(), includeDisabled)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, levels)
+}
+
+func (h *AffiliateHandler) CreateAgentLevel(c *gin.Context) {
+	var req AffiliateAgentLevelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	level, err := h.affiliateService.AdminCreateAgentLevel(c.Request.Context(), req.toServiceInput())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, level)
+}
+
+func (h *AffiliateHandler) UpdateAgentLevel(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid id")
+		return
+	}
+	var req AffiliateAgentLevelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	level, err := h.affiliateService.AdminUpdateAgentLevel(c.Request.Context(), id, req.toServiceInput())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, level)
+}
+
+func (h *AffiliateHandler) DeleteAgentLevel(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid id")
+		return
+	}
+	if err := h.affiliateService.AdminDeleteAgentLevel(c.Request.Context(), id); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"id": id})
 }
 
 // AffiliateUserSummary is the minimal user shape returned by LookupUsers,

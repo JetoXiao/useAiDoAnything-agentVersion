@@ -348,7 +348,7 @@ func (r *oauthEmailAffiliateRepoStub) BindInviter(_ context.Context, userID, inv
 	return true, nil
 }
 
-func (r *oauthEmailAffiliateRepoStub) AccrueQuota(context.Context, int64, int64, float64, int, *int64) (bool, error) {
+func (r *oauthEmailAffiliateRepoStub) AccrueQuota(context.Context, int64, int64, float64, int, *int64, *service.AffiliateRebateSnapshot) (bool, error) {
 	panic("unexpected AccrueQuota call")
 }
 
@@ -366,6 +366,30 @@ func (r *oauthEmailAffiliateRepoStub) TransferQuotaToBalance(context.Context, in
 
 func (r *oauthEmailAffiliateRepoStub) ListInvitees(context.Context, int64, int) ([]service.AffiliateInvitee, error) {
 	panic("unexpected ListInvitees call")
+}
+
+func (r *oauthEmailAffiliateRepoStub) ListAffiliateAgentLevels(context.Context, bool) ([]service.AffiliateAgentLevel, error) {
+	return nil, nil
+}
+
+func (r *oauthEmailAffiliateRepoStub) CreateAffiliateAgentLevel(context.Context, service.AffiliateAgentLevelInput) (*service.AffiliateAgentLevel, error) {
+	panic("unexpected CreateAffiliateAgentLevel call")
+}
+
+func (r *oauthEmailAffiliateRepoStub) UpdateAffiliateAgentLevel(context.Context, int64, service.AffiliateAgentLevelInput) (*service.AffiliateAgentLevel, error) {
+	panic("unexpected UpdateAffiliateAgentLevel call")
+}
+
+func (r *oauthEmailAffiliateRepoStub) DeleteAffiliateAgentLevel(context.Context, int64) error {
+	panic("unexpected DeleteAffiliateAgentLevel call")
+}
+
+func (r *oauthEmailAffiliateRepoStub) SetUserAffiliateLevel(context.Context, int64, *int64) error {
+	panic("unexpected SetUserAffiliateLevel call")
+}
+
+func (r *oauthEmailAffiliateRepoStub) BatchSetUserAffiliateLevel(context.Context, []int64, *int64) error {
+	panic("unexpected BatchSetUserAffiliateLevel call")
 }
 
 func (r *oauthEmailAffiliateRepoStub) UpdateUserAffCode(context.Context, int64, string) error {

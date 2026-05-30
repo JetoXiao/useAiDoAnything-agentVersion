@@ -29,12 +29,26 @@ SELECT ua.user_id,
        ua.aff_code,
        COALESCE(ua.aff_rebate_rate_percent, 0)::double precision,
        (ua.aff_rebate_rate_percent IS NOT NULL) AS has_custom_rate,
+       ua.aff_level_id,
+       ua.aff_level_manual,
+       lvl.id,
+       lvl.code,
+       lvl.name,
+       lvl.rebate_rate_percent::double precision,
+       lvl.min_invited_count,
+       lvl.min_history_quota::double precision,
+       lvl.sort_order,
+       lvl.enabled,
+       lvl.is_default,
+       lvl.created_at,
+       lvl.updated_at,
        ua.aff_count,
        COALESCE(rebated.rebated_invitee_count, 0),
        (ua.aff_quota + COALESCE(matured.matured_frozen_quota, 0))::double precision,
        ua.aff_history_quota::double precision
 FROM user_affiliates ua
 JOIN users u ON u.id = ua.user_id
+LEFT JOIN affiliate_agent_levels lvl ON lvl.id = ua.aff_level_id
 LEFT JOIN (
     SELECT user_id, COUNT(DISTINCT source_user_id)::integer AS rebated_invitee_count
     FROM user_affiliate_ledger
@@ -114,7 +128,7 @@ func (r *affiliateRepository) BindInviter(ctx context.Context, userID, inviterID
 	return bound, nil
 }
 
-func (r *affiliateRepository) AccrueQuota(ctx context.Context, inviterID, inviteeUserID int64, amount float64, freezeHours int, sourceOrderID *int64) (bool, error) {
+func (r *affiliateRepository) AccrueQuota(ctx context.Context, inviterID, inviteeUserID int64, amount float64, freezeHours int, sourceOrderID *int64, snapshot *service.AffiliateRebateSnapshot) (bool, error) {
 	if amount <= 0 {
 		return false, nil
 	}
@@ -138,19 +152,46 @@ func (r *affiliateRepository) AccrueQuota(ctx context.Context, inviterID, invite
 			return nil
 		}
 
-		if freezeHours > 0 {
-			if _, err = txClient.ExecContext(txCtx, `
-INSERT INTO user_affiliate_ledger (user_id, action, amount, source_user_id, source_order_id, frozen_until, created_at, updated_at)
-VALUES ($1, 'accrue', $2, $3, $4, NOW() + make_interval(hours => $5), NOW(), NOW())`,
-				inviterID, amount, inviteeUserID, nullableInt64Arg(sourceOrderID), freezeHours); err != nil {
-				return fmt.Errorf("insert affiliate accrue ledger: %w", err)
-			}
-		} else {
-			if _, err = txClient.ExecContext(txCtx, `
-INSERT INTO user_affiliate_ledger (user_id, action, amount, source_user_id, source_order_id, created_at, updated_at)
-VALUES ($1, 'accrue', $2, $3, $4, NOW(), NOW())`, inviterID, amount, inviteeUserID, nullableInt64Arg(sourceOrderID)); err != nil {
-				return fmt.Errorf("insert affiliate accrue ledger: %w", err)
-			}
+		if _, err = txClient.ExecContext(txCtx, `
+INSERT INTO user_affiliate_ledger (
+    user_id,
+    action,
+    amount,
+    source_user_id,
+    source_order_id,
+    frozen_until,
+    rebate_rate_percent,
+    agent_level_id,
+    agent_level_code,
+    agent_level_name,
+    created_at,
+    updated_at
+)
+VALUES (
+    $1,
+    'accrue',
+    $2,
+    $3,
+    $4,
+    CASE WHEN $5 > 0 THEN NOW() + make_interval(hours => $5) ELSE NULL END,
+    $6,
+    $7,
+    $8,
+    $9,
+    NOW(),
+    NOW()
+)`,
+			inviterID,
+			amount,
+			inviteeUserID,
+			nullableInt64Arg(sourceOrderID),
+			freezeHours,
+			affiliateSnapshotRateArg(snapshot),
+			affiliateSnapshotLevelIDArg(snapshot),
+			affiliateSnapshotLevelCodeArg(snapshot),
+			affiliateSnapshotLevelNameArg(snapshot),
+		); err != nil {
+			return fmt.Errorf("insert affiliate accrue ledger: %w", err)
 		}
 
 		applied = true
@@ -506,6 +547,8 @@ SELECT po.id,
        po.amount::double precision,
        po.pay_amount::double precision,
        ual.amount::double precision,
+       ual.rebate_rate_percent::double precision,
+       COALESCE(ual.agent_level_name, ''),
        po.payment_type,
        po.status,
        ual.created_at
@@ -520,6 +563,7 @@ LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
 	items := make([]service.AffiliateRebateRecord, 0)
 	for rows.Next() {
 		var item service.AffiliateRebateRecord
+		var rebateRate sql.NullFloat64
 		if err := rows.Scan(
 			&item.OrderID,
 			&item.OutTradeNo,
@@ -532,12 +576,15 @@ LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
 			&item.OrderAmount,
 			&item.PayAmount,
 			&item.RebateAmount,
+			&rebateRate,
+			&item.AgentLevelName,
 			&item.PaymentType,
 			&item.OrderStatus,
 			&item.CreatedAt,
 		); err != nil {
 			return nil, 0, err
 		}
+		item.RebateRatePercent = nullableFloat64Ptr(rebateRate)
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -651,6 +698,8 @@ func (r *affiliateRepository) GetAffiliateUserOverview(ctx context.Context, user
 	var overview service.AffiliateUserOverview
 	var customRate float64
 	var hasCustomRate bool
+	var affLevelID sql.NullInt64
+	var level affiliateAgentLevelNulls
 	if err := rows.Scan(
 		&overview.UserID,
 		&overview.Email,
@@ -658,6 +707,19 @@ func (r *affiliateRepository) GetAffiliateUserOverview(ctx context.Context, user
 		&overview.AffCode,
 		&customRate,
 		&hasCustomRate,
+		&affLevelID,
+		&overview.AffLevelManual,
+		&level.ID,
+		&level.Code,
+		&level.Name,
+		&level.RebateRatePercent,
+		&level.MinInvitedCount,
+		&level.MinHistoryQuota,
+		&level.SortOrder,
+		&level.Enabled,
+		&level.IsDefault,
+		&level.CreatedAt,
+		&level.UpdatedAt,
 		&overview.InvitedCount,
 		&overview.RebatedInviteeCount,
 		&overview.AvailableQuota,
@@ -668,6 +730,13 @@ func (r *affiliateRepository) GetAffiliateUserOverview(ctx context.Context, user
 	if hasCustomRate {
 		overview.RebateRatePercent = customRate
 		overview.RebateRateCustom = true
+		overview.AffRebateRatePercent = &overview.RebateRatePercent
+	}
+	if affLevelID.Valid {
+		overview.AffLevelID = &affLevelID.Int64
+	}
+	if agentLevel := affiliateAgentLevelFromNulls(level); agentLevel != nil {
+		overview.AgentLevel = agentLevel
 	}
 	return &overview, rows.Err()
 }
@@ -784,6 +853,8 @@ SELECT user_id,
        aff_code,
        aff_code_custom,
        aff_rebate_rate_percent,
+       aff_level_id,
+       aff_level_manual,
        inviter_id,
        aff_count,
        aff_quota::double precision,
@@ -806,12 +877,15 @@ WHERE user_id = $1`, userID)
 
 	var out service.AffiliateSummary
 	var inviterID sql.NullInt64
+	var levelID sql.NullInt64
 	var rebateRate sql.NullFloat64
 	if err := rows.Scan(
 		&out.UserID,
 		&out.AffCode,
 		&out.AffCodeCustom,
 		&rebateRate,
+		&levelID,
+		&out.AffLevelManual,
 		&inviterID,
 		&out.AffCount,
 		&out.AffQuota,
@@ -824,6 +898,9 @@ WHERE user_id = $1`, userID)
 	}
 	if inviterID.Valid {
 		out.InviterID = &inviterID.Int64
+	}
+	if levelID.Valid {
+		out.AffLevelID = &levelID.Int64
 	}
 	if rebateRate.Valid {
 		v := rebateRate.Float64
@@ -838,6 +915,8 @@ SELECT user_id,
        aff_code,
        aff_code_custom,
        aff_rebate_rate_percent,
+       aff_level_id,
+       aff_level_manual,
        inviter_id,
        aff_count,
        aff_quota::double precision,
@@ -862,12 +941,15 @@ LIMIT 1`, strings.ToUpper(strings.TrimSpace(code)))
 
 	var out service.AffiliateSummary
 	var inviterID sql.NullInt64
+	var levelID sql.NullInt64
 	var rebateRate sql.NullFloat64
 	if err := rows.Scan(
 		&out.UserID,
 		&out.AffCode,
 		&out.AffCodeCustom,
 		&rebateRate,
+		&levelID,
+		&out.AffLevelManual,
 		&inviterID,
 		&out.AffCount,
 		&out.AffQuota,
@@ -880,6 +962,9 @@ LIMIT 1`, strings.ToUpper(strings.TrimSpace(code)))
 	}
 	if inviterID.Valid {
 		out.InviterID = &inviterID.Int64
+	}
+	if levelID.Valid {
+		out.AffLevelID = &levelID.Int64
 	}
 	if rebateRate.Valid {
 		v := rebateRate.Float64
@@ -975,6 +1060,237 @@ func isAffiliateUniqueViolation(err error) bool {
 		return string(pqErr.Code) == "23505"
 	}
 	return false
+}
+
+type affiliateAgentLevelNulls struct {
+	ID                sql.NullInt64
+	Code              sql.NullString
+	Name              sql.NullString
+	RebateRatePercent sql.NullFloat64
+	MinInvitedCount   sql.NullInt64
+	MinHistoryQuota   sql.NullFloat64
+	SortOrder         sql.NullInt64
+	Enabled           sql.NullBool
+	IsDefault         sql.NullBool
+	CreatedAt         sql.NullTime
+	UpdatedAt         sql.NullTime
+}
+
+func affiliateAgentLevelFromNulls(v affiliateAgentLevelNulls) *service.AffiliateAgentLevel {
+	if !v.ID.Valid {
+		return nil
+	}
+	return &service.AffiliateAgentLevel{
+		ID:                v.ID.Int64,
+		Code:              v.Code.String,
+		Name:              v.Name.String,
+		RebateRatePercent: v.RebateRatePercent.Float64,
+		MinInvitedCount:   int(v.MinInvitedCount.Int64),
+		MinHistoryQuota:   v.MinHistoryQuota.Float64,
+		SortOrder:         int(v.SortOrder.Int64),
+		Enabled:           v.Enabled.Bool,
+		IsDefault:         v.IsDefault.Bool,
+		CreatedAt:         v.CreatedAt.Time,
+		UpdatedAt:         v.UpdatedAt.Time,
+	}
+}
+
+func scanAffiliateAgentLevel(rows *sql.Rows) (*service.AffiliateAgentLevel, error) {
+	var level service.AffiliateAgentLevel
+	if err := rows.Scan(
+		&level.ID,
+		&level.Code,
+		&level.Name,
+		&level.RebateRatePercent,
+		&level.MinInvitedCount,
+		&level.MinHistoryQuota,
+		&level.SortOrder,
+		&level.Enabled,
+		&level.IsDefault,
+		&level.CreatedAt,
+		&level.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &level, nil
+}
+
+const affiliateAgentLevelColumns = `
+id,
+code,
+name,
+rebate_rate_percent::double precision,
+min_invited_count,
+min_history_quota::double precision,
+sort_order,
+enabled,
+is_default,
+created_at,
+updated_at`
+
+func (r *affiliateRepository) ListAffiliateAgentLevels(ctx context.Context, includeDisabled bool) ([]service.AffiliateAgentLevel, error) {
+	client := clientFromContext(ctx, r.client)
+	query := "SELECT " + affiliateAgentLevelColumns + " FROM affiliate_agent_levels"
+	args := []any{}
+	if !includeDisabled {
+		query += " WHERE enabled = true"
+	}
+	query += " ORDER BY sort_order ASC, id ASC"
+	rows, err := client.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list affiliate agent levels: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	levels := make([]service.AffiliateAgentLevel, 0)
+	for rows.Next() {
+		level, err := scanAffiliateAgentLevel(rows)
+		if err != nil {
+			return nil, err
+		}
+		levels = append(levels, *level)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return levels, nil
+}
+
+func (r *affiliateRepository) CreateAffiliateAgentLevel(ctx context.Context, input service.AffiliateAgentLevelInput) (*service.AffiliateAgentLevel, error) {
+	var created *service.AffiliateAgentLevel
+	err := r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		if input.IsDefault {
+			if _, err := txClient.ExecContext(txCtx, "UPDATE affiliate_agent_levels SET is_default = false, updated_at = NOW() WHERE is_default = true"); err != nil {
+				return fmt.Errorf("clear default affiliate agent levels: %w", err)
+			}
+		}
+		rows, err := txClient.QueryContext(txCtx, `
+INSERT INTO affiliate_agent_levels (
+    code,
+    name,
+    rebate_rate_percent,
+    min_invited_count,
+    min_history_quota,
+    sort_order,
+    enabled,
+    is_default,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+RETURNING `+affiliateAgentLevelColumns,
+			input.Code,
+			input.Name,
+			input.RebateRatePercent,
+			input.MinInvitedCount,
+			input.MinHistoryQuota,
+			input.SortOrder,
+			input.Enabled,
+			input.IsDefault,
+		)
+		if err != nil {
+			if isAffiliateUniqueViolation(err) {
+				return service.ErrAffiliateLevelCodeTaken
+			}
+			return fmt.Errorf("create affiliate agent level: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return service.ErrAffiliateLevelNotFound
+		}
+		created, err = scanAffiliateAgentLevel(rows)
+		if err != nil {
+			return err
+		}
+		return rows.Err()
+	})
+	return created, err
+}
+
+func (r *affiliateRepository) UpdateAffiliateAgentLevel(ctx context.Context, id int64, input service.AffiliateAgentLevelInput) (*service.AffiliateAgentLevel, error) {
+	var updated *service.AffiliateAgentLevel
+	err := r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		if input.IsDefault {
+			if _, err := txClient.ExecContext(txCtx, "UPDATE affiliate_agent_levels SET is_default = false, updated_at = NOW() WHERE is_default = true AND id <> $1", id); err != nil {
+				return fmt.Errorf("clear default affiliate agent levels: %w", err)
+			}
+		}
+		rows, err := txClient.QueryContext(txCtx, `
+UPDATE affiliate_agent_levels
+SET code = $1,
+    name = $2,
+    rebate_rate_percent = $3,
+    min_invited_count = $4,
+    min_history_quota = $5,
+    sort_order = $6,
+    enabled = $7,
+    is_default = $8,
+    updated_at = NOW()
+WHERE id = $9
+RETURNING `+affiliateAgentLevelColumns,
+			input.Code,
+			input.Name,
+			input.RebateRatePercent,
+			input.MinInvitedCount,
+			input.MinHistoryQuota,
+			input.SortOrder,
+			input.Enabled,
+			input.IsDefault,
+			id,
+		)
+		if err != nil {
+			if isAffiliateUniqueViolation(err) {
+				return service.ErrAffiliateLevelCodeTaken
+			}
+			return fmt.Errorf("update affiliate agent level: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return service.ErrAffiliateLevelNotFound
+		}
+		updated, err = scanAffiliateAgentLevel(rows)
+		if err != nil {
+			return err
+		}
+		return rows.Err()
+	})
+	return updated, err
+}
+
+func (r *affiliateRepository) DeleteAffiliateAgentLevel(ctx context.Context, id int64) error {
+	if id <= 0 {
+		return service.ErrAffiliateLevelNotFound
+	}
+	return r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		res, err := txClient.ExecContext(txCtx, `
+UPDATE affiliate_agent_levels
+SET enabled = false,
+    is_default = false,
+    updated_at = NOW()
+WHERE id = $1`, id)
+		if err != nil {
+			return fmt.Errorf("disable affiliate agent level: %w", err)
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return service.ErrAffiliateLevelNotFound
+		}
+		if _, err := txClient.ExecContext(txCtx, `
+UPDATE user_affiliates
+SET aff_level_id = NULL,
+    aff_level_manual = false,
+    updated_at = NOW()
+WHERE aff_level_id = $1`, id); err != nil {
+			return fmt.Errorf("clear disabled affiliate agent level assignments: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateUserAffCode 改写用户的邀请码（自定义专属邀请码）。
@@ -1107,6 +1423,82 @@ WHERE user_id = ANY($2)`, nullableArg(ratePercent), pq.Array(userIDs))
 	})
 }
 
+func (r *affiliateRepository) SetUserAffiliateLevel(ctx context.Context, userID int64, levelID *int64) error {
+	if userID <= 0 {
+		return service.ErrUserNotFound
+	}
+	return r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		if _, err := ensureUserAffiliateWithClient(txCtx, txClient, userID); err != nil {
+			return err
+		}
+		if levelID != nil {
+			if err := ensureAffiliateAgentLevelExists(txCtx, txClient, *levelID); err != nil {
+				return err
+			}
+		}
+		res, err := txClient.ExecContext(txCtx, `
+UPDATE user_affiliates
+SET aff_level_id = $1,
+    aff_level_manual = $1 IS NOT NULL,
+    updated_at = NOW()
+WHERE user_id = $2`, nullableInt64Arg(levelID), userID)
+		if err != nil {
+			return fmt.Errorf("set user affiliate agent level: %w", err)
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return service.ErrUserNotFound
+		}
+		return nil
+	})
+}
+
+func (r *affiliateRepository) BatchSetUserAffiliateLevel(ctx context.Context, userIDs []int64, levelID *int64) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	return r.withTx(ctx, func(txCtx context.Context, txClient *dbent.Client) error {
+		if levelID != nil {
+			if err := ensureAffiliateAgentLevelExists(txCtx, txClient, *levelID); err != nil {
+				return err
+			}
+		}
+		for _, uid := range userIDs {
+			if uid <= 0 {
+				continue
+			}
+			if _, err := ensureUserAffiliateWithClient(txCtx, txClient, uid); err != nil {
+				return err
+			}
+		}
+		_, err := txClient.ExecContext(txCtx, `
+UPDATE user_affiliates
+SET aff_level_id = $1,
+    aff_level_manual = $1 IS NOT NULL,
+    updated_at = NOW()
+WHERE user_id = ANY($2)`, nullableInt64Arg(levelID), pq.Array(userIDs))
+		if err != nil {
+			return fmt.Errorf("batch set user affiliate agent level: %w", err)
+		}
+		return nil
+	})
+}
+
+func ensureAffiliateAgentLevelExists(ctx context.Context, client affiliateQueryExecer, levelID int64) error {
+	rows, err := client.QueryContext(ctx, "SELECT id FROM affiliate_agent_levels WHERE id = $1 LIMIT 1", levelID)
+	if err != nil {
+		return fmt.Errorf("check affiliate agent level: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return service.ErrAffiliateLevelNotFound
+	}
+	return rows.Err()
+}
+
 // nullableArg unwraps a *float64 into an interface{} suitable for SQL parameter
 // binding: nil pointer → SQL NULL, non-nil → the float value.
 func nullableArg(v *float64) any {
@@ -1121,6 +1513,34 @@ func nullableInt64Arg(v *int64) any {
 		return nil
 	}
 	return *v
+}
+
+func affiliateSnapshotRateArg(snapshot *service.AffiliateRebateSnapshot) any {
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot.RebateRatePercent
+}
+
+func affiliateSnapshotLevelIDArg(snapshot *service.AffiliateRebateSnapshot) any {
+	if snapshot == nil || snapshot.AgentLevelID == nil {
+		return nil
+	}
+	return *snapshot.AgentLevelID
+}
+
+func affiliateSnapshotLevelCodeArg(snapshot *service.AffiliateRebateSnapshot) any {
+	if snapshot == nil || strings.TrimSpace(snapshot.AgentLevelCode) == "" {
+		return nil
+	}
+	return snapshot.AgentLevelCode
+}
+
+func affiliateSnapshotLevelNameArg(snapshot *service.AffiliateRebateSnapshot) any {
+	if snapshot == nil || strings.TrimSpace(snapshot.AgentLevelName) == "" {
+		return nil
+	}
+	return snapshot.AgentLevelName
 }
 
 // ListUsersWithCustomSettings 列出有专属配置（自定义码或专属比例）的用户。
@@ -1143,7 +1563,8 @@ func (r *affiliateRepository) ListUsersWithCustomSettings(ctx context.Context, f
 	const baseFrom = `
 FROM user_affiliates ua
 JOIN users u ON u.id = ua.user_id
-WHERE (ua.aff_code_custom = true OR ua.aff_rebate_rate_percent IS NOT NULL)
+LEFT JOIN affiliate_agent_levels lvl ON lvl.id = ua.aff_level_id
+WHERE (ua.aff_code_custom = true OR ua.aff_rebate_rate_percent IS NOT NULL OR ua.aff_level_manual = true)
   AND (u.email ILIKE $1 OR u.username ILIKE $1)`
 
 	client := clientFromContext(ctx, r.client)
@@ -1160,7 +1581,21 @@ SELECT ua.user_id,
        ua.aff_code,
        ua.aff_code_custom,
        ua.aff_rebate_rate_percent,
-       ua.aff_count` + baseFrom + `
+       ua.aff_level_id,
+       ua.aff_level_manual,
+       lvl.id,
+       lvl.code,
+       lvl.name,
+       lvl.rebate_rate_percent::double precision,
+       lvl.min_invited_count,
+       lvl.min_history_quota::double precision,
+       lvl.sort_order,
+       lvl.enabled,
+       lvl.is_default,
+       lvl.created_at,
+       lvl.updated_at,
+       ua.aff_count,
+       ua.aff_history_quota::double precision` + baseFrom + `
 ORDER BY ua.updated_at DESC
 LIMIT $2 OFFSET $3`
 
@@ -1174,14 +1609,36 @@ LIMIT $2 OFFSET $3`
 	for rows.Next() {
 		var e service.AffiliateAdminEntry
 		var rebate sql.NullFloat64
+		var levelID sql.NullInt64
+		var level affiliateAgentLevelNulls
 		if err := rows.Scan(&e.UserID, &e.Email, &e.Username, &e.AffCode,
-			&e.AffCodeCustom, &rebate, &e.AffCount); err != nil {
+			&e.AffCodeCustom,
+			&rebate,
+			&levelID,
+			&e.AffLevelManual,
+			&level.ID,
+			&level.Code,
+			&level.Name,
+			&level.RebateRatePercent,
+			&level.MinInvitedCount,
+			&level.MinHistoryQuota,
+			&level.SortOrder,
+			&level.Enabled,
+			&level.IsDefault,
+			&level.CreatedAt,
+			&level.UpdatedAt,
+			&e.AffCount,
+			&e.AffHistoryQuota); err != nil {
 			return nil, 0, err
 		}
 		if rebate.Valid {
 			v := rebate.Float64
 			e.AffRebateRatePercent = &v
 		}
+		if levelID.Valid {
+			e.AffLevelID = &levelID.Int64
+		}
+		e.AgentLevel = affiliateAgentLevelFromNulls(level)
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
