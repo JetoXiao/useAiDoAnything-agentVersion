@@ -746,7 +746,6 @@ const adminNavItems = computed((): NavItem[] => {
       icon: UsersIcon,
       hideInSimpleMode: true,
       expandOnly: true,
-      featureFlag: flagAffiliate,
       children: [
         { path: '/admin/affiliates/levels', label: t('nav.affiliateAgentLevels'), icon: ChartIcon },
         { path: '/admin/affiliates/invites', label: t('nav.affiliateInviteRecords'), icon: UsersIcon },
